@@ -1,0 +1,44 @@
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Large/generated data
+data/raw/
+data/interim/
+data/processed/
+outputs/
+
+# Keep human labels under version control
+!data/
+!data/labels/
+!data/labels/**
+
+# Common generated artifacts
+*.npz
+*.npy
+*.pkl
+*.joblib
+*.html
+*.png
+*.jpg
+*.jpeg
+*.svg
+
+# Keep project code/config/labels
+!scripts/
+!scripts/**
+!configs/
+!configs/**
+!data/labels/
+!data/labels/**
