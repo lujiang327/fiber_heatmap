@@ -190,9 +190,6 @@ def write_html(path: Path, selected: list[dict], labels: list[str], times: np.nd
               <td>{row["trace_index"]}</td>
               <td>{row["fiber_id"]}</td>
               <td>{row["baseline_9p5_10d"]:.4f}</td>
-              <td>{row["shifted_max"]:.4f}</td>
-              <td>{row["shifted_min"]:.4f}</td>
-              <td>{row["shifted_amplitude"]:.4f}</td>
               <td>
                 <div class="label-picker">
                   <div class="label-btn-row">{label_buttons}</div>
@@ -246,9 +243,6 @@ def write_html(path: Path, selected: list[dict], labels: list[str], times: np.nd
         <th>Trace Index</th>
         <th>Fiber ID</th>
         <th>Baseline</th>
-        <th>Shifted Max</th>
-        <th>Shifted Min</th>
-        <th>Amplitude</th>
         <th>Reviewed Label</th>
         <th>Notes</th>
       </tr>

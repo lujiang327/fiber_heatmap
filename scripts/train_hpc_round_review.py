@@ -93,23 +93,32 @@ def predict_centroid(model: dict, x: np.ndarray) -> tuple[np.ndarray, np.ndarray
     return model["labels"][best], confidence
 
 
+def centroid_distances(model: dict, x: np.ndarray) -> np.ndarray:
+    xz = (x - model["mean"]) / model["std"]
+    return np.linalg.norm(xz[:, None, :] - model["centroids"][None, :, :], axis=2)
+
+
 def select_for_review(
     candidates: list[dict],
     predicted_labels: np.ndarray,
     confidence: np.ndarray,
+    distances: np.ndarray,
+    model_labels: list[str],
     exclude_keys: set[tuple[str, int]],
     labels: list[str],
     per_class: int,
 ) -> list[dict]:
     selected: list[dict] = []
+    selected_keys: set[tuple[str, int]] = set()
     for label in labels:
         idxs = [
             i
             for i, row in enumerate(candidates)
-            if predicted_labels[i] == label and candidate_key(row) not in exclude_keys
+            if predicted_labels[i] == label
+            and candidate_key(row) not in exclude_keys
+            and candidate_key(row) not in selected_keys
         ]
-        if not idxs:
-            continue
+        label_distance_col = model_labels.index(label)
         idxs.sort(key=lambda i: (-float(confidence[i]), candidates[i]["source_file"], candidates[i]["trace_index"]))
         if len(idxs) <= per_class:
             chosen = idxs
@@ -119,11 +128,30 @@ def select_for_review(
             step = max(len(rest) / max(per_class - len(high), 1), 1)
             spread = [rest[int(j * step)] for j in range(per_class - len(high))]
             chosen = high + spread
+        if len(chosen) < per_class:
+            backfill = [
+                i
+                for i, row in enumerate(candidates)
+                if candidate_key(row) not in exclude_keys
+                and candidate_key(row) not in selected_keys
+                and i not in chosen
+            ]
+            backfill.sort(
+                key=lambda i: (
+                    float(distances[i, label_distance_col]),
+                    candidates[i]["source_file"],
+                    candidates[i]["trace_index"],
+                )
+            )
+            chosen.extend(backfill[: per_class - len(chosen)])
         for i in chosen[:per_class]:
             row = dict(candidates[i])
-            row["predicted_label"] = str(predicted_labels[i])
+            row["predicted_label"] = label
+            row["model_top_label"] = str(predicted_labels[i])
             row["prediction_confidence"] = float(confidence[i])
+            row["target_label_distance"] = float(distances[i, label_distance_col])
             selected.append(row)
+            selected_keys.add(candidate_key(row))
     selected.sort(key=lambda row: (row["predicted_label"], -row["prediction_confidence"]))
     return selected
 
@@ -141,7 +169,9 @@ def write_review_csv(path: Path, selected: list[dict]) -> None:
         "shifted_min",
         "shifted_amplitude",
         "predicted_label",
+        "model_top_label",
         "prediction_confidence",
+        "target_label_distance",
     ]
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -177,7 +207,9 @@ def write_review_html(path: Path, selected: list[dict], all_labels: list[str], t
                 "shifted_min": row["shifted_min"],
                 "shifted_amplitude": row["shifted_amplitude"],
                 "predicted_label": row["predicted_label"],
+                "model_top_label": row.get("model_top_label", row["predicted_label"]),
                 "prediction_confidence": row["prediction_confidence"],
+                "target_label_distance": row.get("target_label_distance", ""),
             }
         )
         rows.append(
@@ -188,10 +220,8 @@ def write_review_html(path: Path, selected: list[dict], all_labels: list[str], t
               <td>{row["trace_index"]}</td>
               <td>{row["fiber_id"]}</td>
               <td>{html.escape(row["predicted_label"])}</td>
+              <td>{html.escape(row.get("model_top_label", row["predicted_label"]))}</td>
               <td>{row["prediction_confidence"]:.4f}</td>
-              <td>{row["shifted_max"]:.4f}</td>
-              <td>{row["shifted_min"]:.4f}</td>
-              <td>{row["shifted_amplitude"]:.4f}</td>
               <td>
                 <div class="label-picker">
                   <div class="label-btn-row">{label_buttons}</div>
@@ -244,10 +274,8 @@ def write_review_html(path: Path, selected: list[dict], all_labels: list[str], t
         <th>Trace Index</th>
         <th>Fiber ID</th>
         <th>Predicted</th>
+        <th>Model Top</th>
         <th>Confidence</th>
-        <th>Shifted Max</th>
-        <th>Shifted Min</th>
-        <th>Amplitude</th>
         <th>Reviewed Label</th>
         <th>Notes</th>
       </tr>
@@ -284,7 +312,7 @@ def write_review_html(path: Path, selected: list[dict], all_labels: list[str], t
       const headers = [
         "review_index", "source_file", "source_path", "trace_index", "fiber_id", "nd2_name", "tile_name",
         "baseline_9p5_10d", "shifted_max", "shifted_min", "shifted_amplitude",
-        "predicted_label", "prediction_confidence", "reviewed_label", "notes"
+        "predicted_label", "model_top_label", "prediction_confidence", "target_label_distance", "reviewed_label", "notes"
       ];
       const lines = [headers.map(csvEscape).join(",")];
       document.querySelectorAll("tr[data-row-id]").forEach((tr, idx) => {{
@@ -327,6 +355,12 @@ def main() -> None:
     )
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/review_exports/hpc_model_round1"))
     parser.add_argument("--per-class", type=int, default=20)
+    parser.add_argument(
+        "--target-labels",
+        nargs="*",
+        default=None,
+        help="Optional subset of trained labels to export for review.",
+    )
     args = parser.parse_args()
 
     all_labels = load_labels(args.schema)
@@ -354,9 +388,26 @@ def main() -> None:
 
     x_all = build_feature_matrix(candidates)
     predicted, confidence = predict_centroid(model, x_all)
+    distances = centroid_distances(model, x_all)
     exclude_keys = {candidate_key(row) for row in train_candidates}
     trained_labels = model["labels"].tolist()
-    selected = select_for_review(candidates, predicted, confidence, exclude_keys, trained_labels, args.per_class)
+    if args.target_labels:
+        unknown_targets = [label for label in args.target_labels if label not in trained_labels]
+        if unknown_targets:
+            raise SystemExit(f"Target labels have no training examples: {', '.join(unknown_targets)}")
+        review_labels = args.target_labels
+    else:
+        review_labels = trained_labels
+    selected = select_for_review(
+        candidates,
+        predicted,
+        confidence,
+        distances,
+        trained_labels,
+        exclude_keys,
+        review_labels,
+        args.per_class,
+    )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     write_review_csv(args.out_dir / "hpc_model_round1_candidates.csv", selected)
@@ -371,7 +422,7 @@ def main() -> None:
 
     train_counts = {label: int(np.sum(y_train_array == label)) for label in trained_labels}
     pred_counts = {label: int(np.sum(predicted == label)) for label in trained_labels}
-    selected_counts = {label: sum(row["predicted_label"] == label for row in selected) for label in trained_labels}
+    selected_counts = {label: sum(row["predicted_label"] == label for row in selected) for label in review_labels}
     print(f"matched labeled rows: {len(train_candidates)}")
     print(f"missing labeled rows: {len(missing)}")
     print("training label counts:")
@@ -386,7 +437,7 @@ def main() -> None:
     for label in trained_labels:
         print(f"  {label}: {pred_counts[label]}")
     print("selected review counts:")
-    for label in trained_labels:
+    for label in review_labels:
         print(f"  {label}: {selected_counts[label]}")
     print(f"html: {args.out_dir / 'hpc_model_round1_review.html'}")
     print(f"candidate csv: {args.out_dir / 'hpc_model_round1_candidates.csv'}")
