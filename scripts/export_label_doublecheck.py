@@ -193,10 +193,19 @@ def main() -> None:
     parser.add_argument("--schema", type=Path, required=True)
     parser.add_argument("--labels-csv", type=Path, default=Path("data/labels/hpc_reviewed_labels_merged.csv"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/review_exports/hpc_merged_label_doublecheck"))
+    parser.add_argument(
+        "--target-labels",
+        nargs="*",
+        default=None,
+        help="Optional reviewed labels to include in the double-check HTML.",
+    )
     args = parser.parse_args()
 
     labels = load_labels(args.schema)
     label_rows = read_labels(args.labels_csv)
+    if args.target_labels:
+        target_labels = set(args.target_labels)
+        label_rows = [row for row in label_rows if row["reviewed_label"].strip() in target_labels]
     candidates, times = collect_candidates(args.raw_dir)
     candidate_by_key = {candidate_key(row): row for row in candidates}
 
